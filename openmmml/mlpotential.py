@@ -33,7 +33,7 @@ import openmm
 import openmm.app
 import openmm.unit as unit
 from copy import deepcopy
-from typing import Dict, Iterable, Optional
+from typing import Dict, Iterable, Optional, List
 
 
 class MLPotentialImplFactory(object):
@@ -150,6 +150,36 @@ class MLPotential(object):
             potential functions for more information.
         """
         self._impl = MLPotential._implFactories[name].createImpl(name, **args)
+
+
+    def createDecoupledSystem(self, mixed_system: openmm.System, ml_subset: List[int]) -> openmm.System:
+
+        """
+        Takes a mixed system, identifies non-bonded interactions between the ml subset and the rest of the system and defines a global parameter to smoothly switch these off.  This should allow us to do the calculations for an absolute binding free energy cycle
+
+        """
+        alchemical_system = deepcopy(mixed_system)
+        cv = openmm.CustomCVForce("")
+        # initialise in fully interacting state
+        cv.addGlobalParameter("lambda_nonbonded_interaction", 1)
+        long_range_forces = []
+        for idx, force in enumerate(mixed_system.getForces()):
+            # the only non bonded forces left in the mixed system will be between the protein and small molecule
+            # these forces need to be removed, and the replacement force, wrapped in a customCV, added to replace it
+            if isinstance(force, openmm.NonbondedForce):
+                alchemical_system.removeForce(idx)
+                name = f"mmProtNonBonded{idx+1}"
+                cv.addCollectiveVariable(name, deepcopy(force))
+                long_range_forces.append(name)
+
+
+        long_range_sum = '+'.join(long_range_forces) if len(long_range_forces) > 0 else '0'
+        cv.setEnergyFunction(f"lambda_nonbonded_interaction*({long_range_sum})")
+        alchemical_system.addForce(cv)
+        return alchemical_system
+
+
+        
     
     def createSystem(self, topology: openmm.app.Topology, **args) -> openmm.System:
         """Create a System for running a simulation with this potential function.
@@ -272,6 +302,7 @@ class MLPotential(object):
             cv.addGlobalParameter('lambda_interpolate', 1)
             tempSystem = openmm.System()
             self._impl.addForces(topology, tempSystem, atomList, forceGroup, **args)
+            # These simply get summed by the expression at the end
             mlVarNames = []
             for i, force in enumerate(tempSystem.getForces()):
                 name = f'mlForce{i+1}'
@@ -295,6 +326,7 @@ class MLPotential(object):
 
             for force in system.getForces():
                 if isinstance(force, openmm.NonbondedForce):
+                    # add the protein-ligand 12-6 LJ interaction
                     internalNonbonded = openmm.CustomBondForce('138.935456*chargeProd/r + 4*epsilon*((sigma/r)^12-(sigma/r)^6)')
                     internalNonbonded.addPerBondParameter('chargeProd')
                     internalNonbonded.addPerBondParameter('sigma')
