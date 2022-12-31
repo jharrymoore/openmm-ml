@@ -1,20 +1,16 @@
 from e3nn.util import jit
-import time
 import torch
 from torch_nl import compute_neighborlist, compute_neighborlist_n2
-import mace
 from mace import data
 from mace.tools import torch_geometric, utils
-from typing import Optional, Iterable, List
+from typing import Optional, Iterable
 import openmm
 from openmmtorch import TorchForce
-from openmmml.mlpotential import MLPotential, MLPotentialImpl, MLPotentialImplFactory
+from openmmml.mlpotential import MLPotentialImpl, MLPotentialImplFactory
 from ase import Atoms
 from openmm.app import Topology
 
 from ase.units import kJ, mol, nm
-from ase.io import write
-from tempfile import mkstemp
 
 
 def compile_model(model_path):
