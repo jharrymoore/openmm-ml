@@ -152,7 +152,7 @@ class MLPotential(object):
         self._impl = MLPotential._implFactories[name].createImpl(name, **args)
 
 
-    def createDecoupledSystem(self, mixed_system: openmm.System, ml_subset: List[int]) -> openmm.System:
+    def createDecoupledSystem(self, mixed_system: openmm.System ) -> openmm.System:
 
         """
         Takes a mixed system, identifies non-bonded interactions between the ml subset and the rest of the system and defines a global parameter to smoothly switch these off.  This should allow us to do the calculations for an absolute binding free energy cycle
