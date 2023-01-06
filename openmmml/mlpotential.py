@@ -161,12 +161,14 @@ class MLPotential(object):
         alchemical_system = deepcopy(mixed_system)
         cv = openmm.CustomCVForce("")
         # initialise in fully interacting state
-        cv.addGlobalParameter("lambda_nonbonded_interaction", 1)
+        cv.addGlobalParameter("lambda_interpolate", 1)
         long_range_forces = []
         for idx, force in enumerate(mixed_system.getForces()):
+            print("force:", force)
             # the only non bonded forces left in the mixed system will be between the protein and small molecule
             # these forces need to be removed, and the replacement force, wrapped in a customCV, added to replace it
             if isinstance(force, openmm.NonbondedForce):
+                print("identified nonbonded force", force)
                 alchemical_system.removeForce(idx)
                 name = f"mmProtNonBonded{idx+1}"
                 cv.addCollectiveVariable(name, deepcopy(force))
@@ -174,7 +176,7 @@ class MLPotential(object):
 
 
         long_range_sum = '+'.join(long_range_forces) if len(long_range_forces) > 0 else '0'
-        cv.setEnergyFunction(f"lambda_nonbonded_interaction*({long_range_sum})")
+        cv.setEnergyFunction(f"lambda_interpolate*({long_range_sum})")
         alchemical_system.addForce(cv)
         return alchemical_system
 

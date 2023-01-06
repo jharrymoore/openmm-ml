@@ -18,6 +18,7 @@ def compile_model(model_path):
     res = {}
     res["model"] = jit.compile(model)
     res["z_table"] = utils.AtomicNumberTable([int(z) for z in model.atomic_numbers])
+    print("rmax from model is", model.r_max)
     res["r_max"] = model.r_max
     return res
 
