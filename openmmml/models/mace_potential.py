@@ -4,6 +4,7 @@ from torch_nl import compute_neighborlist, compute_neighborlist_n2
 from mace import data
 from mace.tools import torch_geometric, utils
 from typing import Optional, Iterable
+from ase import Atoms
 import openmm
 from openmmtorch import TorchForce
 from openmmml.mlpotential import MLPotentialImpl, MLPotentialImplFactory
@@ -28,6 +29,7 @@ class MACE_openmm(torch.nn.Module):
         self,
         model_path: str,
         dtype: torch.dtype,
+        pbc: bool = False,
         atom_indices: Optional[Iterable] = None,
         nl: str = "torch_nl",
         atoms_obj: Optional[Atoms] = None,
@@ -44,6 +46,7 @@ class MACE_openmm(torch.nn.Module):
         self.device = torch.device(device)
         self.atom_indices = atom_indices
         self.dtype = dtype
+        self.pbc = pbc
 
         self.register_buffer("ev_to_kj_mol", torch.tensor(mol / kJ))
         self.register_buffer("eV_per_A_to_kj_mol_nm", torch.tensor((mol * nm) / kJ ))
@@ -73,7 +76,7 @@ class MACE_openmm(torch.nn.Module):
         self.model = dat["model"]
         self.r_max = dat["r_max"]
 
-    def forward(self, positions, boxVectors):
+    def forward(self, positions: torch.Tensor, boxVectors: torch.Tensor ):
         # openMM hands over the entire topology to the forward model, we need to select the subset involved in the ML computation
         positions = (
             positions[self.atom_indices] if self.atom_indices is not None else positions
@@ -81,18 +84,21 @@ class MACE_openmm(torch.nn.Module):
         positions = positions * 10
 
         boxVectors = boxVectors * 10
+        # print("box vectors in angstroms", boxVectors)
         boxVectors = boxVectors.type(self.dtype).to(self.device)
         bbatch = torch.zeros(positions.shape[0], dtype=torch.long, device=self.device)
+
+        # else:
         mapping, batch_mapping, shifts_idx = self.nl(
             cutoff=self.r_max,
             pos=positions.to(self.device),
             cell=boxVectors,
-            pbc=torch.tensor([True, True, True], device=self.device),
+            # TODO: hardcoded for now
+            pbc=torch.tensor(3 * [False], device=self.device),
             batch=bbatch,
             dtype=self.dtype,
         )
-
-        # Eliminate self-edges that don't cross periodic boundaries
+            # Eliminate self-edges that don't cross periodic boundaries
         true_self_edge = mapping[0] == mapping[1]
         true_self_edge &= torch.all(shifts_idx == 0, dim=1)
         keep_edge = ~true_self_edge
@@ -109,7 +115,15 @@ class MACE_openmm(torch.nn.Module):
         inp_dict_this_config["positions"] = positions.to(self.device)
         inp_dict_this_config["edge_index"] = edge_index
         inp_dict_this_config["shifts"] = shifts_idx
-
+        # if use_profile:
+        #     print("Module profiling running...")
+        #     with profile(activities=[ProfilerActivity.CPU, ProfilerActivity.CUDA], record_shapes=True, profile_memory=True,
+        #     on_trace_ready=torch.profiler.tensorboard_trace_handler('./tb_logs'), with_stack=True) as prof:
+        #         with record_function("model_inference"):
+        #             res = self.model(inp_dict_this_config, compute_force=False)
+        #     prof.export_chrome_trace()
+        # else:
+        #     res = self.model(inp_dict_this_config, compute_force=False)
         res = self.model(inp_dict_this_config, compute_force=False)
         interaction_energy = res["interaction_energy"]
         if interaction_energy is None:
@@ -152,17 +166,18 @@ class MacePotentialImpl(MLPotentialImpl):
         model = torch.load(filename)
         model = jit.compile(model)
         print("MACE model compiled")
+        print(args)
         # TODO: this should take a topology
         # A bit hacky to add the atoms object like this
         openmm_calc = MACE_openmm(filename, atom_indices=atoms, **args)
         jit.script(openmm_calc).save("md_test_mace.pt")
         force = TorchForce("md_test_mace.pt")
         force.setOutputsForces(False)
-        # is_periodic = (
-        #     topology.getPeriodicBoxVectors() is not None
-        # ) or system.usesPeriodicBoundaryConditions()
+        is_periodic = (
+            topology.getPeriodicBoxVectors() is not None
+        ) or system.usesPeriodicBoundaryConditions()
         # print("Periodic boundary conditions:", is_periodic)
-        force.setUsesPeriodicBoundaryConditions(True)
+        force.setUsesPeriodicBoundaryConditions(is_periodic)
         # force.setForceGroup()
         # modify the system in place to add the force
         system.addForce(force)

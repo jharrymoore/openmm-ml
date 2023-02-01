@@ -301,7 +301,7 @@ class MLPotential(object):
             # Create a CustomCVForce and put the ML forces inside it.
 
             cv = openmm.CustomCVForce('')
-            cv.addGlobalParameter('lambda_interpolate', 1)
+            cv.addGlobalParameter('lambda_interpolate', 1.0)
             tempSystem = openmm.System()
             self._impl.addForces(topology, tempSystem, atomList, forceGroup, **args)
             # These simply get summed by the expression at the end
