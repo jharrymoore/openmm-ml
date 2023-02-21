@@ -44,7 +44,7 @@ class MACE_openmm(torch.nn.Module):
         else:
             raise NotImplementedError
         self.device = torch.device(device)
-        self.atom_indices = atom_indices
+        self.atom_indices = torch.tensor(atom_indices) if atom_indices is not None else None
         self.dtype = dtype
         self.pbc = pbc
 
@@ -94,7 +94,7 @@ class MACE_openmm(torch.nn.Module):
             pos=positions.to(self.device),
             cell=boxVectors,
             # TODO: hardcoded for now
-            pbc=torch.tensor(3 * [False], device=self.device),
+            pbc=torch.tensor(3 * [self.pbc], device=self.device),
             batch=bbatch,
             dtype=self.dtype,
         )
