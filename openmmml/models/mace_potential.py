@@ -57,7 +57,7 @@ class MACE_openmm(torch.nn.Module):
         data_loader = torch_geometric.dataloader.DataLoader(
             dataset=[
                 data.AtomicData.from_config(
-                    config, z_table=dat["z_table"], cutoff=dat["r_max"]
+                    config, z_table=dat["z_table"], cutoff=float(dat["r_max"])
                 )
             ],
             batch_size=1,
@@ -95,7 +95,6 @@ class MACE_openmm(torch.nn.Module):
             cell=boxVectors,
             pbc=torch.tensor(3 * [self.pbc], device=self.device),
             batch=bbatch,
-            dtype=self.dtype,
         )
             # Eliminate self-edges that don't cross periodic boundaries
         true_self_edge = mapping[0] == mapping[1]
