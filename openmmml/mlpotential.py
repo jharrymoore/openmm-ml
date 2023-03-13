@@ -152,33 +152,6 @@ class MLPotential(object):
         self._impl = MLPotential._implFactories[name].createImpl(name, **args)
 
 
-    def createDecoupledSystem(self, mixed_system: openmm.System ) -> openmm.System:
-
-        """
-        Takes a mixed system, identifies non-bonded interactions between the ml subset and the rest of the system and defines a global parameter to smoothly switch these off.  This should allow us to do the calculations for an absolute binding free energy cycle
-
-        """
-        alchemical_system = deepcopy(mixed_system)
-        cv = openmm.CustomCVForce("")
-        # initialise in fully interacting state
-        cv.addGlobalParameter("lambda_interpolate", 1)
-        long_range_forces = []
-        for idx, force in enumerate(mixed_system.getForces()):
-            print("force:", force)
-            # the only non bonded forces left in the mixed system will be between the protein and small molecule
-            # these forces need to be removed, and the replacement force, wrapped in a customCV, added to replace it
-            if isinstance(force, openmm.NonbondedForce):
-                print("identified nonbonded force", force)
-                alchemical_system.removeForce(idx)
-                name = f"mmProtNonBonded{idx+1}"
-                cv.addCollectiveVariable(name, deepcopy(force))
-                long_range_forces.append(name)
-
-
-        long_range_sum = '+'.join(long_range_forces) if len(long_range_forces) > 0 else '0'
-        cv.setEnergyFunction(f"lambda_interpolate*({long_range_sum})")
-        alchemical_system.addForce(cv)
-        return alchemical_system
 
 
         
@@ -217,7 +190,7 @@ class MLPotential(object):
                           removeConstraints: bool = True,
                           forceGroup: int = 0,
                           interpolate: bool = False,
-                          **args) -> openmm.System:
+                          **kwargs) -> openmm.System:
         """Create a System that is partly modeled with this potential and partly
         with a conventional force field.
 
@@ -275,11 +248,14 @@ class MLPotential(object):
         a newly created System object that uses this potential function to model the Topology
         """
         # Create the new System, removing bonded interactions within the ML subset.
+        # extract atoms objects from **kwargs
 
+
+        # remove all bonds, angles, and torsions for which all atoms are in the ML subset, regardless of which molecule they come from
         newSystem = self._removeBonds(system, atoms, True, removeConstraints)
 
         # Add nonbonded exceptions and exclusions.
-
+        # remove nonbonded components within the subset
         atomList = list(atoms)
         for force in newSystem.getForces():
             if isinstance(force, openmm.NonbondedForce):
@@ -287,6 +263,7 @@ class MLPotential(object):
                     for j in range(i):
                         force.addException(i, j, 0, 1, 0, True)
             elif isinstance(force, openmm.CustomNonbondedForce):
+                print("removing customnonbonded force")
                 existing = set(tuple(force.getExclusionParticles(i)) for i in range(force.getNumExclusions()))
                 for i in range(len(atomList)):
                     for j in range(i):
@@ -296,14 +273,13 @@ class MLPotential(object):
         # Add the ML potential.
 
         if not interpolate:
-            self._impl.addForces(topology, newSystem, atomList, forceGroup, **args)
+            self._impl.addForces(topology, newSystem, atomList, forceGroup, **kwargs)
         else:
             # Create a CustomCVForce and put the ML forces inside it.
-
             cv = openmm.CustomCVForce('')
             cv.addGlobalParameter('lambda_interpolate', 1.0)
             tempSystem = openmm.System()
-            self._impl.addForces(topology, tempSystem, atomList, forceGroup, **args)
+            self._impl.addForces(topology, tempSystem, atomList, forceGroup, **kwargs)
             # These simply get summed by the expression at the end
             mlVarNames = []
             for i, force in enumerate(tempSystem.getForces()):
