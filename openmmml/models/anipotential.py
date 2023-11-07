@@ -155,6 +155,7 @@ class ANIPotentialImpl(MLPotentialImpl):
         force = openmmtorch.TorchForce(filename)
         force.setForceGroup(forceGroup)
         force.setUsesPeriodicBoundaryConditions(is_periodic)
+        force.setProperty("useCUDAGraphs", "true")
         system.addForce(force)
 
 

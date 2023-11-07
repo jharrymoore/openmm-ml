@@ -267,6 +267,7 @@ class MACEPotentialImpl(MLPotentialImpl):
         force = openmmtorch.TorchForce(filename)
         force.setForceGroup(forceGroup)
         force.setUsesPeriodicBoundaryConditions(is_periodic)
+        force.setProperty("useCUDAGraphs", "true")
         # force.setOutputsForces(True)
         system.addForce(force)
 
