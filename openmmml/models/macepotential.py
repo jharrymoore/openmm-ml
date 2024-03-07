@@ -28,9 +28,15 @@ DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR
 OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE
 USE OR OTHER DEALINGS IN THE SOFTWARE.
 """
+
 import openmm
 from openmmml.mlpotential import MLPotential, MLPotentialImpl, MLPotentialImplFactory
 from typing import Iterable, Optional, Tuple
+import logging
+import torch
+from NNPOps.neighbors import getNeighborPairs
+
+logger = logging.getLogger("INFO")
 
 
 class MACEPotentialImplFactory(MLPotentialImplFactory):
@@ -41,6 +47,60 @@ class MACEPotentialImplFactory(MLPotentialImplFactory):
     ) -> MLPotentialImpl:
         return MACEPotentialImpl(name, modelPath)
 
+
+def _getNeighborPairs(
+    positions: torch.Tensor, 
+    cell: Optional[torch.Tensor],
+    r_max: torch.Tensor,
+    dtype: torch.dtype
+
+) -> Tuple[torch.Tensor, torch.Tensor]:
+    """
+    Get the shifts and edge indices.
+
+    Notes
+    -----
+    This method calculates the shifts and edge indices by determining neighbor pairs (`neighbors`)
+    and respective wrapped distances (`wrappedDeltas`) using `NNPOps.neighbors.getNeighborPairs`.
+    After obtaining the `neighbors` and `wrappedDeltas`, the pairs with negative indices (r>cutoff)
+    are filtered out, and the edge indices and shifts are finally calculated.
+
+    Parameters
+    ----------
+    positions : torch.Tensor
+        The positions of the atoms.
+    cell : torch.Tensor
+        The cell vectors.
+
+    Returns
+    -------
+    edgeIndex : torch.Tensor
+        The edge indices.
+    shifts : torch.Tensor
+        The shifts.
+    """
+    # Get the neighbor pairs, shifts and edge indices.
+    neighbors, wrappedDeltas, _, _ = getNeighborPairs(
+        positions, r_max, -1, cell
+    )
+    mask = neighbors >= 0
+    neighbors = neighbors[mask].view(2, -1)
+    wrappedDeltas = wrappedDeltas[mask[0], :]
+
+    edgeIndex = torch.hstack((neighbors, neighbors.flip(0))).to(torch.int64)
+    if cell is not None:
+        deltas = positions[edgeIndex[0]] - positions[edgeIndex[1]]
+        wrappedDeltas = torch.vstack((wrappedDeltas, -wrappedDeltas))
+        shiftsIdx = torch.mm(deltas - wrappedDeltas, torch.linalg.inv(cell))
+        shifts = torch.mm(shiftsIdx, cell)
+    else:
+        shifts = torch.zeros(
+            (edgeIndex.shape[1], 3),
+            dtype=dtype,
+            device=positions.device,
+        )
+
+    return edgeIndex, shifts
 
 class MACEPotentialImpl(MLPotentialImpl):
     """This is the MLPotentialImpl implementing the MACE potential.
@@ -144,13 +204,6 @@ class MACEPotentialImpl(MLPotentialImpl):
                 f"Failed to import e3nn with error: {e}. "
                 "Install e3nn with 'pip install e3nn'."
             )
-        try:
-            from NNPOps.neighbors import getNeighborPairs
-        except ImportError as e:
-            raise ImportError(
-                f"Failed to import NNPOps with error: {e}. "
-                "Install NNPOps with 'conda install -c conda-forge nnpops'."
-            )
 
         assert returnEnergyType in [
             "interaction_energy",
@@ -160,9 +213,11 @@ class MACEPotentialImpl(MLPotentialImpl):
         # Load the model to the CPU (OpenMM-Torch takes care of loading to the right devices)
         if self.name.startswith("mace-off23"):
             size = self.name.split("-")[-1]
-            assert (
-                size in ["small", "medium", "large"]
-            ), f"Unsupported MACE model: '{self.name}'. Available MACE-OFF23 models are 'mace-off23-small', 'mace-off23-medium', 'mace-off23-large'"
+            assert size in [
+                "small",
+                "medium",
+                "large",
+            ], f"Unsupported MACE model: '{self.name}'. Available MACE-OFF23 models are 'mace-off23-small', 'mace-off23-medium', 'mace-off23-large'"
             model = mace_off(model=size, device="cpu", return_raw_model=True)
         elif self.name == "mace":
             if self.modelPath is not None:
@@ -173,7 +228,7 @@ class MACEPotentialImpl(MLPotentialImpl):
             raise ValueError(f"Unsupported MACE model: {self.name}")
 
         # Compile the model.
-        model = jit.compile(model)  
+        model = jit.compile(model)
 
         # Get the atomic numbers of the ML region.
         includedAtoms = list(topology.atoms())
@@ -200,6 +255,8 @@ class MACEPotentialImpl(MLPotentialImpl):
                 f"and requested dtype is {dtype}. "
                 "The model will be converted to the requested dtype."
             )
+        else:
+            print(f"Model dtype is {dtype}.")
 
         # One hot encoding of atomic numbers
         zTable = utils.AtomicNumberTable([int(z) for z in model.atomic_numbers])
@@ -272,65 +329,37 @@ class MACEPotentialImpl(MLPotentialImpl):
                     self.indices = None
                 else:
                     self.indices = torch.tensor(sorted(atoms), dtype=torch.int64)
-                
+
                 # Create the default input dict.
-                self.register_buffer("ptr", torch.tensor([0, nodeAttrs.shape[0]], dtype=torch.long, requires_grad=False))
+                self.register_buffer(
+                    "ptr",
+                    torch.tensor(
+                        [0, nodeAttrs.shape[0]], dtype=torch.long, requires_grad=False
+                    ),
+                )
                 self.register_buffer("node_attrs", nodeAttrs.to(self.dtype))
-                self.register_buffer("batch", torch.zeros(nodeAttrs.shape[0], dtype=torch.long, requires_grad=False))
-                self.register_buffer("pbc", torch.tensor([periodic, periodic, periodic], dtype=torch.bool, requires_grad=False))
+                self.register_buffer(
+                    "batch",
+                    torch.zeros(
+                        nodeAttrs.shape[0], dtype=torch.long, requires_grad=False
+                    ),
+                )
+                self.register_buffer(
+                    "pbc",
+                    torch.tensor(
+                        [periodic, periodic, periodic],
+                        dtype=torch.bool,
+                        requires_grad=False,
+                    ),
+                )
 
                 self.inputDict = {
                     "ptr": self.ptr,
                     "node_attrs": self.node_attrs,
                     "batch": self.batch,
                     "pbc": self.pbc,
-                }                    
+                }
 
-            def _getNeighborPairs(
-                self, positions: torch.Tensor, cell: Optional[torch.Tensor]
-            ) -> Tuple[torch.Tensor, torch.Tensor]:
-                """
-                Get the shifts and edge indices.
-
-                Notes
-                -----
-                This method calculates the shifts and edge indices by determining neighbor pairs (`neighbors`)
-                and respective wrapped distances (`wrappedDeltas`) using `NNPOps.neighbors.getNeighborPairs`.
-                After obtaining the `neighbors` and `wrappedDeltas`, the pairs with negative indices (r>cutoff)
-                are filtered out, and the edge indices and shifts are finally calculated.
-
-                Parameters
-                ----------
-                positions : torch.Tensor
-                    The positions of the atoms.
-                cell : torch.Tensor
-                    The cell vectors.
-
-                Returns
-                -------
-                edgeIndex : torch.Tensor
-                    The edge indices.
-                shifts : torch.Tensor
-                    The shifts.
-                """
-                # Get the neighbor pairs, shifts and edge indices.
-                neighbors, wrappedDeltas, _, _ = getNeighborPairs(
-                    positions, self.model.r_max, -1, cell
-                )
-                mask = neighbors >= 0
-                neighbors = neighbors[mask].view(2, -1)
-                wrappedDeltas = wrappedDeltas[mask[0], :]
-
-                edgeIndex = torch.hstack((neighbors, neighbors.flip(0))).to(torch.int64)
-                if cell is not None:
-                    deltas = positions[edgeIndex[0]] - positions[edgeIndex[1]]
-                    wrappedDeltas = torch.vstack((wrappedDeltas, -wrappedDeltas))
-                    shiftsIdx = torch.mm(deltas - wrappedDeltas, torch.linalg.inv(cell))
-                    shifts = torch.mm(shiftsIdx, cell)
-                else:
-                    shifts = torch.zeros((edgeIndex.shape[1], 3), dtype=self.dtype, device=positions.device)
-
-                return edgeIndex, shifts
 
             def forward(
                 self, positions: torch.Tensor, boxvectors: Optional[torch.Tensor] = None
@@ -362,7 +391,7 @@ class MACEPotentialImpl(MLPotentialImpl):
                     cell = None
 
                 # Get the shifts and edge indices.
-                edgeIndex, shifts = self._getNeighborPairs(positions, cell)
+                edgeIndex, shifts = _getNeighborPairs(positions, cell, r_max=self.model.r_max, dtype=self.dtype)
 
                 # Update input dictionary.
                 self.inputDict["positions"] = positions

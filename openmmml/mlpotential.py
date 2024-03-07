@@ -34,6 +34,10 @@ import openmm.app
 import openmm.unit as unit
 from copy import deepcopy
 from typing import Dict, Iterable, Optional
+import logging
+
+logger = logging.getLogger(__name__)
+logger.setLevel(logging.DEBUG)
 
 
 class MLPotentialImplFactory(object):
@@ -43,7 +47,7 @@ class MLPotentialImplFactory(object):
     of MLPotentialImpl and MLPotentialImplFactory, and register an instance of
     the factory by calling MLPotential.registerImplFactory().
     """
-    
+
     def createImpl(self, name: str, **args) -> "MLPotentialImpl":
         """Create a MLPotentialImpl that will be used to implement a MLPotential.
 
@@ -64,7 +68,7 @@ class MLPotentialImplFactory(object):
         -------
         a MLPotentialImpl that implements the potential
         """
-        raise NotImplementedError('Subclasses must implement createImpl()')
+        raise NotImplementedError("Subclasses must implement createImpl()")
 
 
 class MLPotentialImpl(object):
@@ -76,13 +80,15 @@ class MLPotentialImpl(object):
     factory that has been registered for that name and uses it to create a
     MLPotentialImpl of the appropriate subclass.
     """
-    
-    def addForces(self,
-                  topology: openmm.app.Topology,
-                  system: openmm.System,
-                  atoms: Optional[Iterable[int]],
-                  forceGroup: int,
-                  **args):
+
+    def addForces(
+        self,
+        topology: openmm.app.Topology,
+        system: openmm.System,
+        atoms: Optional[Iterable[int]],
+        forceGroup: int,
+        **args,
+    ):
         """Add Force objects to a System to implement the potential function.
 
         This is invoked by MLPotential.createSystem().  Subclasses must implement
@@ -104,7 +110,7 @@ class MLPotentialImpl(object):
             are passed to this method.  This allows subclasses to customize their
             behavior based on extra arguments.
         """
-        raise NotImplementedError('Subclasses must implement addForces()')
+        raise NotImplementedError("Subclasses must implement addForces()")
 
 
 class MLPotential(object):
@@ -134,7 +140,7 @@ class MLPotential(object):
     """
 
     _implFactories: Dict[str, MLPotentialImplFactory] = {}
-    
+
     def __init__(self, name: str, **args):
         """Create a MLPotential.
 
@@ -150,7 +156,7 @@ class MLPotential(object):
             potential functions for more information.
         """
         self._impl = MLPotential._implFactories[name].createImpl(name, **args)
-    
+
     def createSystem(self, topology: openmm.app.Topology, **args) -> openmm.System:
         """Create a System for running a simulation with this potential function.
 
@@ -178,14 +184,85 @@ class MLPotential(object):
         self._impl.addForces(topology, system, None, 0, **args)
         return system
 
-    def createMixedSystem(self,
-                          topology: openmm.app.Topology,
-                          system: openmm.System,
-                          atoms: Iterable[int],
-                          removeConstraints: bool = True,
-                          forceGroup: int = 0,
-                          interpolate: bool = False,
-                          **args) -> openmm.System:
+    def createAlchemicalSystem(
+        self,
+        topology: openmm.app.Topology,
+        solute_atoms: Iterable[int],
+        forceGroup: int = 0,
+        **args,
+    ):
+        """Create a system that is entirely modelled with an ML potential, but we can access the interaction energy via evaluation
+        of subsets of the system, with the interaction energy scaled by a lambda parameter.
+        """
+        solvent_atoms = [
+            atom.index for atom in topology.atoms() if atom.index not in solute_atoms
+        ]
+        all_atoms = [atom.index for atom in topology.atoms()]
+        system = openmm.System()
+        if topology.getPeriodicBoxVectors() is not None:
+            system.setDefaultPeriodicBoxVectors(*topology.getPeriodicBoxVectors())
+        for atom in topology.atoms():
+            if atom.element is None:
+                system.addParticle(0)
+            else:
+                system.addParticle(atom.element.mass)
+
+        logger.info(f"Creating alchemical system with {len(solute_atoms)} solute atoms and {len(solvent_atoms)} solvent atoms")
+
+
+        # now we need to dd three forces and a lambda parameter to control how the various components are combined
+        # first the solute atoms only
+        cv = openmm.CustomCVForce("")
+        # we use lambda interpolate to retain compatability with the repex code in openmmtools
+        cv.addGlobalParameter("lambda_interpolate", 1)
+        tempSystem = openmm.System()
+
+        self._impl.addForces(topology, tempSystem, solute_atoms, forceGroup, **args)
+        decoupledVarNames = []
+        for idx, force in enumerate(tempSystem.getForces()):
+            name = f"soluteForce{idx+1}"
+            cv.addCollectiveVariable(name, deepcopy(force))
+            decoupledVarNames.append(name)
+
+        tempSystem2 = openmm.System()
+        self._impl.addForces(topology, tempSystem2, solvent_atoms, forceGroup, **args)
+        for idx, force in enumerate(tempSystem2.getForces()):
+            name = f"solventForce{idx+1}"
+            cv.addCollectiveVariable(name, deepcopy(force))
+            decoupledVarNames.append(name)
+
+        # full system
+        tempSystem3 = openmm.System()
+        self._impl.addForces(topology, tempSystem3, all_atoms, forceGroup, **args)
+        interactingVarNames = []
+        for idx, force in enumerate(tempSystem3.getForces()):
+            name = f"allForce{idx+1}"
+            cv.addCollectiveVariable(name, deepcopy(force))
+            interactingVarNames.append(name)
+
+
+        assert len(interactingVarNames) > 0 and len(decoupledVarNames) > 0
+
+        interactingSum = "+".join(interactingVarNames)
+        noninteractingSum = "+".join(decoupledVarNames)
+
+        cv.setEnergyFunction(
+            f"lambda_interpolate*({interactingSum}) + (1-lambda_interpolate)*({noninteractingSum})"
+        )
+        system.addForce(cv)
+
+        return system
+
+    def createMixedSystem(
+        self,
+        topology: openmm.app.Topology,
+        system: openmm.System,
+        atoms: Iterable[int],
+        removeConstraints: bool = True,
+        forceGroup: int = 0,
+        interpolate: bool = False,
+        **args,
+    ) -> openmm.System:
         """Create a System that is partly modeled with this potential and partly
         with a conventional force field.
 
@@ -255,7 +332,10 @@ class MLPotential(object):
                     for j in range(i):
                         force.addException(atomList[i], atomList[j], 0, 1, 0, True)
             elif isinstance(force, openmm.CustomNonbondedForce):
-                existing = set(tuple(force.getExclusionParticles(i)) for i in range(force.getNumExclusions()))
+                existing = set(
+                    tuple(force.getExclusionParticles(i))
+                    for i in range(force.getNumExclusions())
+                )
                 for i in range(len(atomList)):
                     a1 = atomList[i]
                     for j in range(i):
@@ -270,13 +350,13 @@ class MLPotential(object):
         else:
             # Create a CustomCVForce and put the ML forces inside it.
 
-            cv = openmm.CustomCVForce('')
-            cv.addGlobalParameter('lambda_interpolate', 1)
+            cv = openmm.CustomCVForce("")
+            cv.addGlobalParameter("lambda_interpolate", 1)
             tempSystem = openmm.System()
             self._impl.addForces(topology, tempSystem, atomList, forceGroup, **args)
             mlVarNames = []
             for i, force in enumerate(tempSystem.getForces()):
-                name = f'mlForce{i+1}'
+                name = f"mlForce{i+1}"
                 cv.addCollectiveVariable(name, deepcopy(force))
                 mlVarNames.append(name)
 
@@ -285,11 +365,15 @@ class MLPotential(object):
             bondedSystem = self._removeBonds(system, atoms, False, removeConstraints)
             bondedForces = []
             for force in bondedSystem.getForces():
-                if hasattr(force, 'addBond') or hasattr(force, 'addAngle') or hasattr(force, 'addTorsion'):
+                if (
+                    hasattr(force, "addBond")
+                    or hasattr(force, "addAngle")
+                    or hasattr(force, "addTorsion")
+                ):
                     bondedForces.append(force)
             mmVarNames = []
             for i, force in enumerate(bondedForces):
-                name = f'mmForce{i+1}'
+                name = f"mmForce{i+1}"
                 cv.addCollectiveVariable(name, deepcopy(force))
                 mmVarNames.append(name)
 
@@ -297,14 +381,16 @@ class MLPotential(object):
 
             for force in system.getForces():
                 if isinstance(force, openmm.NonbondedForce):
-                    internalNonbonded = openmm.CustomBondForce('138.935456*chargeProd/r + 4*epsilon*((sigma/r)^12-(sigma/r)^6)')
-                    internalNonbonded.addPerBondParameter('chargeProd')
-                    internalNonbonded.addPerBondParameter('sigma')
-                    internalNonbonded.addPerBondParameter('epsilon')
+                    internalNonbonded = openmm.CustomBondForce(
+                        "138.935456*chargeProd/r + 4*epsilon*((sigma/r)^12-(sigma/r)^6)"
+                    )
+                    internalNonbonded.addPerBondParameter("chargeProd")
+                    internalNonbonded.addPerBondParameter("sigma")
+                    internalNonbonded.addPerBondParameter("epsilon")
                     numParticles = system.getNumParticles()
-                    atomCharge = [0]*numParticles
-                    atomSigma = [0]*numParticles
-                    atomEpsilon = [0]*numParticles
+                    atomCharge = [0] * numParticles
+                    atomSigma = [0] * numParticles
+                    atomEpsilon = [0] * numParticles
                     for i in range(numParticles):
                         charge, sigma, epsilon = force.getParticleParameters(i)
                         atomCharge[i] = charge
@@ -312,7 +398,9 @@ class MLPotential(object):
                         atomEpsilon[i] = epsilon
                     exceptions = {}
                     for i in range(force.getNumExceptions()):
-                        p1, p2, chargeProd, sigma, epsilon = force.getExceptionParameters(i)
+                        p1, p2, chargeProd, sigma, epsilon = (
+                            force.getExceptionParameters(i)
+                        )
                         exceptions[(p1, p2)] = (chargeProd, sigma, epsilon)
                     for p1 in atomList:
                         for p2 in atomList:
@@ -323,25 +411,35 @@ class MLPotential(object):
                             elif (p2, p1) in exceptions:
                                 chargeProd, sigma, epsilon = exceptions[(p2, p1)]
                             else:
-                                chargeProd = atomCharge[p1]*atomCharge[p2]
-                                sigma = 0.5*(atomSigma[p1]+atomSigma[p2])
-                                epsilon = unit.sqrt(atomEpsilon[p1]*atomEpsilon[p2])
+                                chargeProd = atomCharge[p1] * atomCharge[p2]
+                                sigma = 0.5 * (atomSigma[p1] + atomSigma[p2])
+                                epsilon = unit.sqrt(atomEpsilon[p1] * atomEpsilon[p2])
                             if chargeProd._value != 0 or epsilon._value != 0:
-                                internalNonbonded.addBond(p1, p2, [chargeProd, sigma, epsilon])
+                                internalNonbonded.addBond(
+                                    p1, p2, [chargeProd, sigma, epsilon]
+                                )
                     if internalNonbonded.getNumBonds() > 0:
-                        name = f'mmForce{len(mmVarNames)+1}'
+                        name = f"mmForce{len(mmVarNames)+1}"
                         cv.addCollectiveVariable(name, internalNonbonded)
                         mmVarNames.append(name)
 
             # Configure the CustomCVForce so lambda_interpolate interpolates between the conventional and ML potentials.
 
-            mlSum = '+'.join(mlVarNames) if len(mlVarNames) > 0 else '0'
-            mmSum = '+'.join(mmVarNames) if len(mmVarNames) > 0 else '0'
-            cv.setEnergyFunction(f'lambda_interpolate*({mlSum}) + (1-lambda_interpolate)*({mmSum})')
+            mlSum = "+".join(mlVarNames) if len(mlVarNames) > 0 else "0"
+            mmSum = "+".join(mmVarNames) if len(mmVarNames) > 0 else "0"
+            cv.setEnergyFunction(
+                f"lambda_interpolate*({mlSum}) + (1-lambda_interpolate)*({mmSum})"
+            )
             newSystem.addForce(cv)
         return newSystem
 
-    def _removeBonds(self, system: openmm.System, atoms: Iterable[int], removeInSet: bool, removeConstraints: bool) -> openmm.System:
+    def _removeBonds(
+        self,
+        system: openmm.System,
+        atoms: Iterable[int],
+        removeInSet: bool,
+        removeConstraints: bool,
+    ) -> openmm.System:
         """Copy a System, removing all bonded interactions between atoms in (or not in) a particular set.
 
         Parameters
@@ -365,6 +463,7 @@ class MLPotential(object):
         # Create an XML representation of the System.
 
         import xml.etree.ElementTree as ET
+
         xml = openmm.XmlSerializer.serialize(system)
         root = ET.fromstring(xml)
 
@@ -375,34 +474,36 @@ class MLPotential(object):
 
         # Remove bonds, angles, and torsions.
 
-        for bonds in root.findall('./Forces/Force/Bonds'):
-            for bond in bonds.findall('Bond'):
-                bondAtoms = [int(bond.attrib[p]) for p in ('p1', 'p2')]
+        for bonds in root.findall("./Forces/Force/Bonds"):
+            for bond in bonds.findall("Bond"):
+                bondAtoms = [int(bond.attrib[p]) for p in ("p1", "p2")]
                 if shouldRemove(bondAtoms):
                     bonds.remove(bond)
-        for angles in root.findall('./Forces/Force/Angles'):
-            for angle in angles.findall('Angle'):
-                angleAtoms = [int(angle.attrib[p]) for p in ('p1', 'p2', 'p3')]
+        for angles in root.findall("./Forces/Force/Angles"):
+            for angle in angles.findall("Angle"):
+                angleAtoms = [int(angle.attrib[p]) for p in ("p1", "p2", "p3")]
                 if shouldRemove(angleAtoms):
                     angles.remove(angle)
-        for torsions in root.findall('./Forces/Force/Torsions'):
-            for torsion in torsions.findall('Torsion'):
-                torsionAtoms = [int(torsion.attrib[p]) for p in ('p1', 'p2', 'p3', 'p4')]
+        for torsions in root.findall("./Forces/Force/Torsions"):
+            for torsion in torsions.findall("Torsion"):
+                torsionAtoms = [
+                    int(torsion.attrib[p]) for p in ("p1", "p2", "p3", "p4")
+                ]
                 if shouldRemove(torsionAtoms):
                     torsions.remove(torsion)
 
         # Optionally remove constraints.
 
         if removeConstraints:
-            for constraints in root.findall('./Constraints'):
-                for constraint in constraints.findall('Constraint'):
-                    constraintAtoms = [int(constraint.attrib[p]) for p in ('p1', 'p2')]
+            for constraints in root.findall("./Constraints"):
+                for constraint in constraints.findall("Constraint"):
+                    constraintAtoms = [int(constraint.attrib[p]) for p in ("p1", "p2")]
                     if shouldRemove(constraintAtoms):
                         constraints.remove(constraint)
 
         # Create a new System from it.
 
-        return openmm.XmlSerializer.deserialize(ET.tostring(root, encoding='unicode'))
+        return openmm.XmlSerializer.deserialize(ET.tostring(root, encoding="unicode"))
 
     @staticmethod
     def registerImplFactory(name: str, factory: MLPotentialImplFactory):

@@ -6,7 +6,7 @@ from setuptools import setup, find_packages
 DOCLINES = __doc__.split("\n")
 
 ########################
-__version__ = '1.1'
+__version__ = "1.1"
 VERSION = __version__
 ISRELEASED = False
 ########################
@@ -27,16 +27,16 @@ Operating System :: MacOS
 
 
 setup(
-    name='openmmml',
-    author='Peter Eastman',
+    name="openmmml",
+    author="Peter Eastman",
     description=DOCLINES[0],
     long_description="\n".join(DOCLINES[2:]),
     version=__version__,
-    license='MIT',
-    url='https://github.com/openmm/openmm-ml',
-    platforms=['Linux', 'Mac OS-X', 'Unix', 'Windows'],
+    license="MIT",
+    url="https://github.com/openmm/openmm-ml",
+    platforms=["Linux", "Mac OS-X", "Unix", "Windows"],
     classifiers=CLASSIFIERS.splitlines(),
     packages=find_packages(),
     zip_safe=False,
-    install_requires=['numpy', 'openmm >= 7.5'])
-
+    install_requires=["numpy", "openmm >= 7.5"],
+)

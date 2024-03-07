@@ -5,21 +5,37 @@ import openmm.unit as unit
 from openmmml import MLPotential
 import pytest
 import itertools
-rtol=1e-5
+
+rtol = 1e-5
 platform_ints = range(mm.Platform.getNumPlatforms())
 
 
-@pytest.mark.parametrize("implementation,platform_int", list(itertools.product(['nnpops', 'torchani'], list(platform_ints))))
+@pytest.mark.parametrize(
+    "implementation,platform_int",
+    list(itertools.product(["nnpops", "torchani"], list(platform_ints))),
+)
 class TestMLPotential:
 
     def testCreateMixedSystem(self, implementation, platform_int):
-        pdb = app.PDBFile('alanine-dipeptide-explicit.pdb')
-        ff = app.ForceField('amber14-all.xml', 'amber14/tip3pfb.xml')
+        pdb = app.PDBFile("alanine-dipeptide-explicit.pdb")
+        ff = app.ForceField("amber14-all.xml", "amber14/tip3pfb.xml")
         mmSystem = ff.createSystem(pdb.topology, nonbondedMethod=app.PME)
-        potential = MLPotential('ani2x')
+        potential = MLPotential("ani2x")
         mlAtoms = [a.index for a in next(pdb.topology.chains()).atoms()]
-        mixedSystem = potential.createMixedSystem(pdb.topology, mmSystem, mlAtoms, interpolate=False, implementation=implementation)
-        interpSystem = potential.createMixedSystem(pdb.topology, mmSystem, mlAtoms, interpolate=True, implementation=implementation)
+        mixedSystem = potential.createMixedSystem(
+            pdb.topology,
+            mmSystem,
+            mlAtoms,
+            interpolate=False,
+            implementation=implementation,
+        )
+        interpSystem = potential.createMixedSystem(
+            pdb.topology,
+            mmSystem,
+            mlAtoms,
+            interpolate=True,
+            implementation=implementation,
+        )
         platform = mm.Platform.getPlatform(platform_int)
         mmContext = mm.Context(mmSystem, mm.VerletIntegrator(0.001), platform)
         mixedContext = mm.Context(mixedSystem, mm.VerletIntegrator(0.001), platform)
@@ -27,10 +43,26 @@ class TestMLPotential:
         mmContext.setPositions(pdb.positions)
         mixedContext.setPositions(pdb.positions)
         interpContext.setPositions(pdb.positions)
-        mmEnergy = mmContext.getState(getEnergy=True).getPotentialEnergy().value_in_unit(unit.kilojoules_per_mole)
-        mixedEnergy = mixedContext.getState(getEnergy=True).getPotentialEnergy().value_in_unit(unit.kilojoules_per_mole)
-        interpEnergy1 = interpContext.getState(getEnergy=True).getPotentialEnergy().value_in_unit(unit.kilojoules_per_mole)
-        interpContext.setParameter('lambda_interpolate', 0)
-        interpEnergy2 = interpContext.getState(getEnergy=True).getPotentialEnergy().value_in_unit(unit.kilojoules_per_mole)
+        mmEnergy = (
+            mmContext.getState(getEnergy=True)
+            .getPotentialEnergy()
+            .value_in_unit(unit.kilojoules_per_mole)
+        )
+        mixedEnergy = (
+            mixedContext.getState(getEnergy=True)
+            .getPotentialEnergy()
+            .value_in_unit(unit.kilojoules_per_mole)
+        )
+        interpEnergy1 = (
+            interpContext.getState(getEnergy=True)
+            .getPotentialEnergy()
+            .value_in_unit(unit.kilojoules_per_mole)
+        )
+        interpContext.setParameter("lambda_interpolate", 0)
+        interpEnergy2 = (
+            interpContext.getState(getEnergy=True)
+            .getPotentialEnergy()
+            .value_in_unit(unit.kilojoules_per_mole)
+        )
         assert np.isclose(mixedEnergy, interpEnergy1, rtol=rtol)
         assert np.isclose(mmEnergy, interpEnergy2, rtol=rtol)
