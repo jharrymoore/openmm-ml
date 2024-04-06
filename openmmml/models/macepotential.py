@@ -49,11 +49,10 @@ class MACEPotentialImplFactory(MLPotentialImplFactory):
 
 
 def _getNeighborPairs(
-    positions: torch.Tensor, 
+    positions: torch.Tensor,
     cell: Optional[torch.Tensor],
     r_max: torch.Tensor,
-    dtype: torch.dtype
-
+    dtype: torch.dtype,
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     """
     Get the shifts and edge indices.
@@ -80,9 +79,7 @@ def _getNeighborPairs(
         The shifts.
     """
     # Get the neighbor pairs, shifts and edge indices.
-    neighbors, wrappedDeltas, _, _ = getNeighborPairs(
-        positions, r_max, -1, cell
-    )
+    neighbors, wrappedDeltas, _, _ = getNeighborPairs(positions, r_max, -1, cell)
     mask = neighbors >= 0
     neighbors = neighbors[mask].view(2, -1)
     wrappedDeltas = wrappedDeltas[mask[0], :]
@@ -101,6 +98,7 @@ def _getNeighborPairs(
         )
 
     return edgeIndex, shifts
+
 
 class MACEPotentialImpl(MLPotentialImpl):
     """This is the MLPotentialImpl implementing the MACE potential.
@@ -164,6 +162,7 @@ class MACEPotentialImpl(MLPotentialImpl):
         forceGroup: int,
         precision: Optional[str] = None,
         returnEnergyType: str = "interaction_energy",
+        decouple_indices: Optional[torch.Tensor] = None,
         **args,
     ) -> None:
         """
@@ -298,6 +297,7 @@ class MACEPotentialImpl(MLPotentialImpl):
                 periodic: bool,
                 dtype: torch.dtype,
                 returnEnergyType: str,
+                decouple_indices: Optional[torch.Tensor] = None,
             ) -> None:
                 """
                 Initialize the MACEForce.
@@ -324,6 +324,7 @@ class MACEPotentialImpl(MLPotentialImpl):
                 self.energyScale = 96.4853
                 self.lengthScale = 10.0
                 self.returnEnergyType = returnEnergyType
+                self.decouple_indices = decouple_indices
 
                 if atoms is None:
                     self.indices = None
@@ -360,9 +361,11 @@ class MACEPotentialImpl(MLPotentialImpl):
                     "pbc": self.pbc,
                 }
 
-
             def forward(
-                self, positions: torch.Tensor, boxvectors: Optional[torch.Tensor] = None
+                self,
+                positions: torch.Tensor,
+                boxvectors: Optional[torch.Tensor] = None,
+                globalParameters: Optional[torch.Tensor] = None,
             ) -> torch.Tensor:
                 """
                 Forward pass of the model.
@@ -383,15 +386,21 @@ class MACEPotentialImpl(MLPotentialImpl):
                 if self.indices is not None:
                     positions = positions[self.indices]
 
-                positions = positions.to(self.dtype) * self.lengthScale
+                # get lambda_interpolate from global parameters passed to from openmm-torch
+                if globalParameters is not None:
+                    lambda_interpolate = globalParameters
+                else:
+                    lambda_interpolate = torch.tensor(1.0)
 
+                positions = positions.to(self.dtype) * self.lengthScale
                 if boxvectors is not None:
                     cell = boxvectors.to(self.dtype) * self.lengthScale
                 else:
                     cell = None
-
                 # Get the shifts and edge indices.
-                edgeIndex, shifts = _getNeighborPairs(positions, cell, r_max=self.model.r_max, dtype=self.dtype)
+                edgeIndex, shifts = _getNeighborPairs(
+                    positions, cell, r_max=self.model.r_max, dtype=self.dtype
+                )
 
                 # Update input dictionary.
                 self.inputDict["positions"] = positions
@@ -399,9 +408,12 @@ class MACEPotentialImpl(MLPotentialImpl):
                 self.inputDict["shifts"] = shifts
 
                 # Predict the energy.
-                energy = self.model(self.inputDict, compute_force=False)[
-                    self.returnEnergyType
-                ]
+                energy = self.model(
+                    self.inputDict,
+                    compute_force=False,
+                    decouple_indices=self.decouple_indices,
+                    lmbda=lambda_interpolate,
+                )[self.returnEnergyType]
 
                 assert (
                     energy is not None
@@ -420,6 +432,7 @@ class MACEPotentialImpl(MLPotentialImpl):
             isPeriodic,
             dtype,
             returnEnergyType,
+            decouple_indices,
         )
 
         # Convert it to TorchScript.
@@ -429,6 +442,8 @@ class MACEPotentialImpl(MLPotentialImpl):
         force = openmmtorch.TorchForce(module)
         force.setForceGroup(forceGroup)
         force.setUsesPeriodicBoundaryConditions(isPeriodic)
+        if decouple_indices is not None:
+            force.addGlobalParameter("lambda_interpolate", 1.0)
         system.addForce(force)
 
 

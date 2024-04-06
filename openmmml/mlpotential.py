@@ -35,6 +35,7 @@ import openmm.unit as unit
 from copy import deepcopy
 from typing import Dict, Iterable, Optional
 import logging
+import torch
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.DEBUG)
@@ -207,8 +208,9 @@ class MLPotential(object):
             else:
                 system.addParticle(atom.element.mass)
 
-        logger.info(f"Creating alchemical system with {len(solute_atoms)} solute atoms and {len(solvent_atoms)} solvent atoms")
-
+        logger.info(
+            f"Creating alchemical system with {len(solute_atoms)} solute atoms and {len(solvent_atoms)} solvent atoms"
+        )
 
         # now we need to dd three forces and a lambda parameter to control how the various components are combined
         # first the solute atoms only
@@ -217,7 +219,13 @@ class MLPotential(object):
         cv.addGlobalParameter("lambda_interpolate", 1)
         tempSystem = openmm.System()
 
-        self._impl.addForces(topology, tempSystem, solute_atoms, forceGroup, **args)
+        self._impl.addForces(
+            topology,
+            tempSystem,
+            solute_atoms,
+            forceGroup,
+            **args,
+        )
         decoupledVarNames = []
         for idx, force in enumerate(tempSystem.getForces()):
             name = f"soluteForce{idx+1}"
@@ -231,15 +239,21 @@ class MLPotential(object):
             cv.addCollectiveVariable(name, deepcopy(force))
             decoupledVarNames.append(name)
 
-        # full system
+        # full system - contains interactions between solute and solvent.
         tempSystem3 = openmm.System()
-        self._impl.addForces(topology, tempSystem3, all_atoms, forceGroup, **args)
+        self._impl.addForces(
+            topology,
+            tempSystem3,
+            all_atoms,
+            forceGroup,
+            decouple_indices=torch.tensor(solute_atoms),
+            **args,
+        )
         interactingVarNames = []
         for idx, force in enumerate(tempSystem3.getForces()):
             name = f"allForce{idx+1}"
             cv.addCollectiveVariable(name, deepcopy(force))
             interactingVarNames.append(name)
-
 
         assert len(interactingVarNames) > 0 and len(decoupledVarNames) > 0
 
