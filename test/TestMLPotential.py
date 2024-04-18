@@ -8,6 +8,8 @@ import itertools
 
 rtol = 1e-5
 platform_ints = range(mm.Platform.getNumPlatforms())
+print(platform_ints)
+# print available platform names
 
 
 @pytest.mark.parametrize(
@@ -20,7 +22,7 @@ class TestMLPotential:
         pdb = app.PDBFile("alanine-dipeptide-explicit.pdb")
         ff = app.ForceField("amber14-all.xml", "amber14/tip3pfb.xml")
         mmSystem = ff.createSystem(pdb.topology, nonbondedMethod=app.PME)
-        potential = MLPotential("ani2x")
+        potential = MLPotential("mace-off23-small")
         mlAtoms = [a.index for a in next(pdb.topology.chains()).atoms()]
         mixedSystem = potential.createMixedSystem(
             pdb.topology,

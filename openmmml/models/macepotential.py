@@ -34,7 +34,12 @@ from openmmml.mlpotential import MLPotential, MLPotentialImpl, MLPotentialImplFa
 from typing import Iterable, Optional, Tuple
 import logging
 import torch
-from NNPOps.neighbors import getNeighborPairs
+try:
+    import intel_extension_for_pytorch as ipex
+except ImportError:
+    print("Failed to import intel extension for pytorch - Expect errors if using XPU")
+
+# from NNPOps.neighbors import getNeighborPairs
 
 logger = logging.getLogger("INFO")
 
@@ -48,56 +53,155 @@ class MACEPotentialImplFactory(MLPotentialImplFactory):
         return MACEPotentialImpl(name, modelPath)
 
 
-def _getNeighborPairs(
+#
+# def _getNeighborPairs(
+#     positions: torch.Tensor,
+#     cell: Optional[torch.Tensor],
+#     r_max: torch.Tensor,
+#     dtype: torch.dtype,
+# ) -> Tuple[torch.Tensor, torch.Tensor]:
+#     """
+#     Get the shifts and edge indices.
+#
+#     Notes
+#     -----
+#     This method calculates the shifts and edge indices by determining neighbor pairs (`neighbors`)
+#     and respective wrapped distances (`wrappedDeltas`) using `NNPOps.neighbors.getNeighborPairs`.
+#     After obtaining the `neighbors` and `wrappedDeltas`, the pairs with negative indices (r>cutoff)
+#     are filtered out, and the edge indices and shifts are finally calculated.
+#
+#     Parameters
+#     ----------
+#     positions : torch.Tensor
+#         The positions of the atoms.
+#     cell : torch.Tensor
+#         The cell vectors.
+#
+#     Returns
+#     -------
+#     edgeIndex : torch.Tensor
+#         The edge indices.
+#     shifts : torch.Tensor
+#         The shifts.
+#     """
+#     # Get the neighbor pairs, shifts and edge indices.
+#     neighbors, wrappedDeltas, _, _ = getNeighborPairs(positions, r_max, -1, cell)
+#     mask = neighbors >= 0
+#     neighbors = neighbors[mask].view(2, -1)
+#     wrappedDeltas = wrappedDeltas[mask[0], :]
+#
+#     edgeIndex = torch.hstack((neighbors, neighbors.flip(0))).to(torch.int64)
+#     if cell is not None:
+#         deltas = positions[edgeIndex[0]] - positions[edgeIndex[1]]
+#         wrappedDeltas = torch.vstack((wrappedDeltas, -wrappedDeltas))
+#         shiftsIdx = torch.mm(deltas - wrappedDeltas, torch.linalg.inv(cell))
+#         shifts = torch.mm(shiftsIdx, cell)
+#     else:
+#         shifts = torch.zeros(
+#             (edgeIndex.shape[1], 3),
+#             dtype=dtype,
+#             device=positions.device,
+#         )
+#
+#     return edgeIndex, shifts
+
+
+@torch.jit.script
+def simple_nl(
     positions: torch.Tensor,
     cell: Optional[torch.Tensor],
-    r_max: torch.Tensor,
-    dtype: torch.dtype,
+    cutoff: float,
+    sorti: bool = False,
 ) -> Tuple[torch.Tensor, torch.Tensor]:
-    """
-    Get the shifts and edge indices.
+    """simple torchscriptable neighborlist.
 
-    Notes
-    -----
-    This method calculates the shifts and edge indices by determining neighbor pairs (`neighbors`)
-    and respective wrapped distances (`wrappedDeltas`) using `NNPOps.neighbors.getNeighborPairs`.
-    After obtaining the `neighbors` and `wrappedDeltas`, the pairs with negative indices (r>cutoff)
-    are filtered out, and the edge indices and shifts are finally calculated.
+    It aims are to be correct, clear, and torchscript compatible.
+    It is O(n^2) but with pytorch vectorisation the prefactor is small.
+    It outputs neighbors and shifts in the same format as ASE
+    https://wiki.fysik.dtu.dk/ase/ase/neighborlist.html#ase.neighborlist.primitive_neighbor_list
+
+    neighbors, shifts = simple_nl(..)
+    is equivalent to
+
+    [i, j], S = primitive_neighbor_list( quantities="ijS", ...)
+
+    Limitations:
+        - either no PBCs or PBCs in all x,y,z
+        - cutoff must be less than half the smallest box length
+        - cell must be rectangular or triclinic in OpenMM format:
+        http://docs.openmm.org/development/userguide/theory/05_other_features.html#periodic-boundary-conditions
 
     Parameters
     ----------
-    positions : torch.Tensor
-        The positions of the atoms.
-    cell : torch.Tensor
-        The cell vectors.
+    positions: torch.Tensor
+        Coordinates, shape [N,3]
+    cell: torch.Tensor
+        Triclinic unit cell, shape [3,3], must be in OpenMM format: http://docs.openmm.org/development/userguide/theory/05_other_features.html#periodic-boundary-conditions
+    pbc: bool
+        should PBCs be applied
+    cutoff: float
+        Distances beyond cutoff are not included in the nieghborlist
+    soti: bool=False
+        if true the returned nieghborlist will be sorted in the i index. The default is False (no sorting).
 
     Returns
     -------
-    edgeIndex : torch.Tensor
-        The edge indices.
-    shifts : torch.Tensor
-        The shifts.
+    neighbors: torch.Tensor
+        neighbor list, shape [2, number of neighbors]
+    shifts: torch.Tensor
+        shift vector, shape [number of neighbors, 3], From ASE docs:
+        shift vector (number of cell boundaries crossed by the bond between atom i and j).
+        With the shift vector S, the distances D between atoms can be computed from:
+        D = positions[j]-positions[i]+S.dot(cell)
     """
-    # Get the neighbor pairs, shifts and edge indices.
-    neighbors, wrappedDeltas, _, _ = getNeighborPairs(positions, r_max, -1, cell)
-    mask = neighbors >= 0
-    neighbors = neighbors[mask].view(2, -1)
-    wrappedDeltas = wrappedDeltas[mask[0], :]
 
-    edgeIndex = torch.hstack((neighbors, neighbors.flip(0))).to(torch.int64)
+    num_atoms = positions.shape[0]
+    device = positions.device
+
+    # get i,j indices where j>i
+    uij = torch.triu_indices(num_atoms, num_atoms, 1, device=device)
+    triu_deltas = positions[uij[0]] - positions[uij[1]]
+
+    wrapped_triu_deltas = triu_deltas.clone()
+
     if cell is not None:
-        deltas = positions[edgeIndex[0]] - positions[edgeIndex[1]]
-        wrappedDeltas = torch.vstack((wrappedDeltas, -wrappedDeltas))
-        shiftsIdx = torch.mm(deltas - wrappedDeltas, torch.linalg.inv(cell))
-        shifts = torch.mm(shiftsIdx, cell)
-    else:
-        shifts = torch.zeros(
-            (edgeIndex.shape[1], 3),
-            dtype=dtype,
-            device=positions.device,
+        # using method from: https://github.com/openmm/NNPOps/blob/master/src/pytorch/neighbors/getNeighborPairsCPU.cpp
+        wrapped_triu_deltas -= torch.outer(
+            torch.round(wrapped_triu_deltas[:, 2] / cell[2, 2]), cell[2]
+        )
+        wrapped_triu_deltas -= torch.outer(
+            torch.round(wrapped_triu_deltas[:, 1] / cell[1, 1]), cell[1]
+        )
+        wrapped_triu_deltas -= torch.outer(
+            torch.round(wrapped_triu_deltas[:, 0] / cell[0, 0]), cell[0]
         )
 
-    return edgeIndex, shifts
+        # From ASE docs:
+        # wrapped_delta = pos[i] - pos[j] - shift.cell
+        # => shift = ((pos[i]-pos[j]) - wrapped_delta).cell^-1
+        shifts = torch.mm(triu_deltas - wrapped_triu_deltas, torch.linalg.inv(cell))
+
+    else:
+        shifts = torch.zeros(triu_deltas.shape, device=device)
+
+    triu_distances = torch.linalg.norm(wrapped_triu_deltas, dim=1)
+
+    # filter
+    mask = triu_distances > cutoff
+    uij = uij[:, ~mask]
+    shifts = shifts[~mask, :]
+
+    # get the ij pairs where j<i
+    lij = torch.stack((uij[1], uij[0]))
+    neighbors = torch.hstack((uij, lij))
+    shifts = torch.vstack((shifts, -shifts))
+
+    if sorti:
+        idx = torch.argsort(neighbors[0])
+        neighbors = neighbors[:, idx]
+        shifts = shifts[idx, :]
+
+    return neighbors, shifts
 
 
 class MACEPotentialImpl(MLPotentialImpl):
@@ -186,6 +290,7 @@ class MACEPotentialImpl(MLPotentialImpl):
             Default is 'interaction_energy'. Supported options are 'interaction_energy' and 'energy'.
         """
         import torch
+        import intel_extension_for_pytorch as ipex
         import openmmtorch
 
         try:
@@ -227,7 +332,11 @@ class MACEPotentialImpl(MLPotentialImpl):
             raise ValueError(f"Unsupported MACE model: {self.name}")
 
         # Compile the model.
+        model.eval()
+        model = ipex.optimize(model, dtype=torch.float32)
         model = jit.compile(model)
+
+
 
         # Get the atomic numbers of the ML region.
         includedAtoms = list(topology.atoms())
@@ -391,15 +500,16 @@ class MACEPotentialImpl(MLPotentialImpl):
                     lambda_interpolate = globalParameters
                 else:
                     lambda_interpolate = torch.tensor(1.0)
-
                 positions = positions.to(self.dtype) * self.lengthScale
                 if boxvectors is not None:
                     cell = boxvectors.to(self.dtype) * self.lengthScale
                 else:
                     cell = None
                 # Get the shifts and edge indices.
-                edgeIndex, shifts = _getNeighborPairs(
-                    positions, cell, r_max=self.model.r_max, dtype=self.dtype
+                edgeIndex, shifts = simple_nl(
+                    positions,
+                    cell,
+                    self.model.r_max,
                 )
 
                 # Update input dictionary.
@@ -407,13 +517,14 @@ class MACEPotentialImpl(MLPotentialImpl):
                 self.inputDict["edge_index"] = edgeIndex
                 self.inputDict["shifts"] = shifts
 
-                # Predict the energy.
-                energy = self.model(
+                outputs = self.model(
                     self.inputDict,
                     compute_force=False,
                     decouple_indices=self.decouple_indices,
                     lmbda=lambda_interpolate,
-                )[self.returnEnergyType]
+                )
+                energy = outputs[self.returnEnergyType]
+
 
                 assert (
                     energy is not None
@@ -439,7 +550,9 @@ class MACEPotentialImpl(MLPotentialImpl):
         module = torch.jit.script(maceForce)
 
         # Create the TorchForce and add it to the System.
+        print("Adding torchforce")
         force = openmmtorch.TorchForce(module)
+        print(force)
         force.setForceGroup(forceGroup)
         force.setUsesPeriodicBoundaryConditions(isPeriodic)
         if decouple_indices is not None:

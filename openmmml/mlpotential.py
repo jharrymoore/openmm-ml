@@ -263,6 +263,7 @@ class MLPotential(object):
         cv.setEnergyFunction(
             f"lambda_interpolate*({interactingSum}) + (1-lambda_interpolate)*({noninteractingSum})"
         )
+        cv.addEnergyParameterDerivative('lambda_interpolate')
         system.addForce(cv)
 
         return system
