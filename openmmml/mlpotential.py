@@ -219,49 +219,48 @@ class MLPotential(object):
         cv.addGlobalParameter("lambda_interpolate", 1)
         tempSystem = openmm.System()
 
+        # self._impl.addForces(
+        #     topology,
+        #     tempSystem,
+        #     solute_atoms,
+        #     forceGroup,
+        #     **args,
+        # )
+        # decoupledVarNames = []
+        # for idx, force in enumerate(tempSystem.getForces()):
+        #     name = f"soluteForce{idx+1}"
+        #     cv.addCollectiveVariable(name, deepcopy(force))
+        #     decoupledVarNames.append(name)
+        #
+        # tempSystem2 = openmm.System()
+        # self._impl.addForces(topology, tempSystem2, solvent_atoms, forceGroup, **args)
+        # for idx, force in enumerate(tempSystem2.getForces()):
+        #     name = f"solventForce{idx+1}"
+        #     cv.addCollectiveVariable(name, deepcopy(force))
+        #     decoupledVarNames.append(name)
+
+        # full system - contains interactions between solute and solvent.
+        # tempSystem3 = openmm.System()
         self._impl.addForces(
             topology,
             tempSystem,
-            solute_atoms,
-            forceGroup,
-            **args,
-        )
-        decoupledVarNames = []
-        for idx, force in enumerate(tempSystem.getForces()):
-            name = f"soluteForce{idx+1}"
-            cv.addCollectiveVariable(name, deepcopy(force))
-            decoupledVarNames.append(name)
-
-        tempSystem2 = openmm.System()
-        self._impl.addForces(topology, tempSystem2, solvent_atoms, forceGroup, **args)
-        for idx, force in enumerate(tempSystem2.getForces()):
-            name = f"solventForce{idx+1}"
-            cv.addCollectiveVariable(name, deepcopy(force))
-            decoupledVarNames.append(name)
-
-        # full system - contains interactions between solute and solvent.
-        tempSystem3 = openmm.System()
-        self._impl.addForces(
-            topology,
-            tempSystem3,
             all_atoms,
             forceGroup,
             decouple_indices=torch.tensor(solute_atoms),
             **args,
         )
         interactingVarNames = []
-        for idx, force in enumerate(tempSystem3.getForces()):
+        for idx, force in enumerate(tempSystem.getForces()):
             name = f"allForce{idx+1}"
             cv.addCollectiveVariable(name, deepcopy(force))
             interactingVarNames.append(name)
 
-        assert len(interactingVarNames) > 0 and len(decoupledVarNames) > 0
+        assert len(interactingVarNames) > 0 
 
         interactingSum = "+".join(interactingVarNames)
-        noninteractingSum = "+".join(decoupledVarNames)
 
         cv.setEnergyFunction(
-            f"lambda_interpolate*({interactingSum}) + (1-lambda_interpolate)*({noninteractingSum})"
+            f"({interactingSum})"
         )
         system.addForce(cv)
 
