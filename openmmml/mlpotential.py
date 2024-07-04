@@ -217,6 +217,7 @@ class MLPotential(object):
         cv = openmm.CustomCVForce("")
         # we use lambda interpolate to retain compatability with the repex code in openmmtools
         cv.addGlobalParameter("lambda_interpolate", 1)
+        cv.addEnergyParameterDerivative("lambda_interpolate")
         tempSystem = openmm.System()
 
         # self._impl.addForces(
