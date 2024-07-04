@@ -444,6 +444,8 @@ class MACEPotentialImpl(MLPotentialImpl):
         force.setUsesPeriodicBoundaryConditions(isPeriodic)
         if decouple_indices is not None:
             force.addGlobalParameter("lambda_interpolate", 1.0)
+            # enable calculation of dhdl
+            force.addEnergyParameterDerivative("lambda_interpolate")
         system.addForce(force)
 
 
