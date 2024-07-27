@@ -196,6 +196,7 @@ class MACEPotentialImpl(MLPotentialImpl):
         precision: Optional[str] = None,
         returnEnergyType: str = "interaction_energy",
         decouple_indices: Optional[torch.Tensor] = None,
+        optimized_model: bool = False,
         **args,
     ) -> None:
         """
@@ -355,6 +356,7 @@ class MACEPotentialImpl(MLPotentialImpl):
                 super(MACEForce, self).__init__()
 
                 self.dtype = dtype
+                print("Optimized model", optimized_model)
                 self.model = model.to(self.dtype) if not optimized_model else model
                 self.energyScale = 96.4853
                 self.lengthScale = 10.0
@@ -468,6 +470,7 @@ class MACEPotentialImpl(MLPotentialImpl):
             dtype,
             returnEnergyType,
             decouple_indices,
+            optimized_model=optimized_model
         )
 
         # Convert it to TorchScript.

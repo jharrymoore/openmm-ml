@@ -174,7 +174,6 @@ class MLPotential(object):
         -------
         a newly created System object that uses this potential function to model the Topology
         """
-        print("Got precision to mlPotential", args["precision"])
         system = openmm.System()
         if topology.getPeriodicBoxVectors() is not None:
             system.setDefaultPeriodicBoxVectors(*topology.getPeriodicBoxVectors())
