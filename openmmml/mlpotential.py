@@ -174,6 +174,7 @@ class MLPotential(object):
         -------
         a newly created System object that uses this potential function to model the Topology
         """
+        print("Got precision to mlPotential", args["precision"])
         system = openmm.System()
         if topology.getPeriodicBoxVectors() is not None:
             system.setDefaultPeriodicBoxVectors(*topology.getPeriodicBoxVectors())
@@ -211,13 +212,14 @@ class MLPotential(object):
         logger.info(
             f"Creating alchemical system with {len(solute_atoms)} solute atoms and {len(solvent_atoms)} solvent atoms"
         )
+        print("Got precision to mlPotential", args["precision"])
 
         # now we need to dd three forces and a lambda parameter to control how the various components are combined
         # first the solute atoms only
         cv = openmm.CustomCVForce("")
         # we use lambda interpolate to retain compatability with the repex code in openmmtools
         cv.addGlobalParameter("lambda_interpolate", 1)
-        cv.addEnergyParameterDerivative("lambda_interpolate")
+        # cv.addEnergyParameterDerivative("lambda_interpolate")
         tempSystem = openmm.System()
 
         # self._impl.addForces(

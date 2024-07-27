@@ -35,6 +35,7 @@ from typing import Iterable, Optional, Tuple
 import logging
 import torch
 from NNPOps.neighbors import getNeighborPairs
+import numpy as np
 
 logger = logging.getLogger("INFO")
 
@@ -48,11 +49,18 @@ class MACEPotentialImplFactory(MLPotentialImplFactory):
         return MACEPotentialImpl(name, modelPath)
 
 
+# from https://github.com/openmm/NNPOps/blob/master/src/pytorch/neighbors/TestNeighbors.py
+# def sort_neighbors(neighbors, deltas):
+#     i_sorted = np.lexsort(neighbors)[::-1]
+#     return neighbors[:, i_sorted], deltas[i_sorted]
+
+
 def _getNeighborPairs(
     positions: torch.Tensor,
     cell: Optional[torch.Tensor],
     r_max: torch.Tensor,
     dtype: torch.dtype,
+    sort: bool=True
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     """
     Get the shifts and edge indices.
@@ -84,7 +92,24 @@ def _getNeighborPairs(
     neighbors = neighbors[mask].view(2, -1)
     wrappedDeltas = wrappedDeltas[mask[0], :]
 
+    # if sort:
+    #     print("Sorgin neighbour indices")
+    #     # sort such that we have monotonically increasing atom indices 
+    #     print("neighbors first row:")
+    #     print(neighbors.shape)
+    #     print(neighbors[0,:])
+    #     indices = torch.argsort(neighbors[0,:])
+    #     print("indices that sort the array")
+    #     print(indices)
+    #     neighbors = neighbors[:, indices]
+    #     wrappedDeltas = neighbors[:, indices]
+
     edgeIndex = torch.hstack((neighbors, neighbors.flip(0))).to(torch.int64)
+    print("edgeIndex shape")
+    print(edgeIndex.shape)
+
+
+
     if cell is not None:
         deltas = positions[edgeIndex[0]] - positions[edgeIndex[1]]
         wrappedDeltas = torch.vstack((wrappedDeltas, -wrappedDeltas))
@@ -96,6 +121,14 @@ def _getNeighborPairs(
             dtype=dtype,
             device=positions.device,
         )
+
+    if sort:
+        indices = torch.argsort(edgeIndex[0,:])
+        edgeIndex = edgeIndex[:, indices]
+        shifts = -shifts
+
+
+    # for cuda_mace, we need to order the nodes in increasing order
 
     return edgeIndex, shifts
 
@@ -237,6 +270,7 @@ class MACEPotentialImpl(MLPotentialImpl):
 
         # Set the precision that the model will be used with.
         modelDefaultDtype = next(model.parameters()).dtype
+        print("Got precision", precision, "default", modelDefaultDtype)
         if precision is None:
             dtype = modelDefaultDtype
         elif precision == "single":
@@ -298,6 +332,7 @@ class MACEPotentialImpl(MLPotentialImpl):
                 dtype: torch.dtype,
                 returnEnergyType: str,
                 decouple_indices: Optional[torch.Tensor] = None,
+                optimized_model: bool = False
             ) -> None:
                 """
                 Initialize the MACEForce.
@@ -320,7 +355,7 @@ class MACEPotentialImpl(MLPotentialImpl):
                 super(MACEForce, self).__init__()
 
                 self.dtype = dtype
-                self.model = model.to(self.dtype)
+                self.model = model.to(self.dtype) if not optimized_model else model
                 self.energyScale = 96.4853
                 self.lengthScale = 10.0
                 self.returnEnergyType = returnEnergyType
