@@ -105,11 +105,6 @@ def _getNeighborPairs(
     #     wrappedDeltas = neighbors[:, indices]
 
     edgeIndex = torch.hstack((neighbors, neighbors.flip(0))).to(torch.int64)
-    print("edgeIndex shape")
-    print(edgeIndex.shape)
-
-
-
     if cell is not None:
         deltas = positions[edgeIndex[0]] - positions[edgeIndex[1]]
         wrappedDeltas = torch.vstack((wrappedDeltas, -wrappedDeltas))
@@ -125,10 +120,10 @@ def _getNeighborPairs(
     if sort:
         indices = torch.argsort(edgeIndex[0,:])
         edgeIndex = edgeIndex[:, indices]
-        shifts = -shifts
+        shifts = shifts[ indices]
+        # shifts = -shifts
 
 
-    # for cuda_mace, we need to order the nodes in increasing order
 
     return edgeIndex, shifts
 
