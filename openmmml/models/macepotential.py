@@ -60,7 +60,7 @@ def _getNeighborPairs(
     cell: Optional[torch.Tensor],
     r_max: torch.Tensor,
     dtype: torch.dtype,
-    sort: bool=True
+    sort: bool = True
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     """
     Get the shifts and edge indices.
@@ -87,14 +87,15 @@ def _getNeighborPairs(
         The shifts.
     """
     # Get the neighbor pairs, shifts and edge indices.
-    neighbors, wrappedDeltas, _, _ = getNeighborPairs(positions, r_max, -1, cell)
+    neighbors, wrappedDeltas, _, _ = getNeighborPairs(
+        positions, r_max, -1, cell)
     mask = neighbors >= 0
     neighbors = neighbors[mask].view(2, -1)
     wrappedDeltas = wrappedDeltas[mask[0], :]
 
     # if sort:
     #     print("Sorgin neighbour indices")
-    #     # sort such that we have monotonically increasing atom indices 
+    #     # sort such that we have monotonically increasing atom indices
     #     print("neighbors first row:")
     #     print(neighbors.shape)
     #     print(neighbors[0,:])
@@ -118,12 +119,10 @@ def _getNeighborPairs(
         )
 
     if sort:
-        indices = torch.argsort(edgeIndex[0,:])
+        indices = torch.argsort(edgeIndex[0, :])
         edgeIndex = edgeIndex[:, indices]
-        shifts = shifts[ indices]
+        shifts = shifts[indices]
         # shifts = -shifts
-
-
 
     return edgeIndex, shifts
 
@@ -288,7 +287,8 @@ class MACEPotentialImpl(MLPotentialImpl):
             print(f"Model dtype is {dtype}.")
 
         # One hot encoding of atomic numbers
-        zTable = utils.AtomicNumberTable([int(z) for z in model.atomic_numbers])
+        zTable = utils.AtomicNumberTable(
+            [int(z) for z in model.atomic_numbers])
         nodeAttrs = to_one_hot(
             torch.tensor(
                 atomic_numbers_to_indices(atomicNumbers, z_table=zTable),
@@ -352,7 +352,8 @@ class MACEPotentialImpl(MLPotentialImpl):
 
                 self.dtype = dtype
                 print("Optimized model", optimized_model)
-                self.model = model.to(self.dtype) if not optimized_model else model
+                self.model = model.to(
+                    self.dtype) if not optimized_model else model
                 self.energyScale = 96.4853
                 self.lengthScale = 10.0
                 self.returnEnergyType = returnEnergyType
@@ -361,7 +362,8 @@ class MACEPotentialImpl(MLPotentialImpl):
                 if atoms is None:
                     self.indices = None
                 else:
-                    self.indices = torch.tensor(sorted(atoms), dtype=torch.int64)
+                    self.indices = torch.tensor(
+                        sorted(atoms), dtype=torch.int64)
 
                 # Create the default input dict.
                 self.register_buffer(
@@ -478,11 +480,12 @@ class MACEPotentialImpl(MLPotentialImpl):
         if decouple_indices is not None:
             force.addGlobalParameter("lambda_interpolate", 1.0)
             # enable calculation of dhdl
-            force.addEnergyParameterDerivative("lambda_interpolate")
+            # force.addEnergyParameterDerivative("lambda_interpolate")
         system.addForce(force)
 
 
 MLPotential.registerImplFactory("mace", MACEPotentialImplFactory())
 MLPotential.registerImplFactory("mace-off23-small", MACEPotentialImplFactory())
-MLPotential.registerImplFactory("mace-off23-medium", MACEPotentialImplFactory())
+MLPotential.registerImplFactory(
+    "mace-off23-medium", MACEPotentialImplFactory())
 MLPotential.registerImplFactory("mace-off23-large", MACEPotentialImplFactory())
