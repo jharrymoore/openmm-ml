@@ -60,7 +60,7 @@ def _getNeighborPairs(
     cell: Optional[torch.Tensor],
     r_max: torch.Tensor,
     dtype: torch.dtype,
-    sort: bool=True
+    sort: bool = True,
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     """
     Get the shifts and edge indices.
@@ -91,19 +91,6 @@ def _getNeighborPairs(
     mask = neighbors >= 0
     neighbors = neighbors[mask].view(2, -1)
     wrappedDeltas = wrappedDeltas[mask[0], :]
-
-    # if sort:
-    #     print("Sorgin neighbour indices")
-    #     # sort such that we have monotonically increasing atom indices 
-    #     print("neighbors first row:")
-    #     print(neighbors.shape)
-    #     print(neighbors[0,:])
-    #     indices = torch.argsort(neighbors[0,:])
-    #     print("indices that sort the array")
-    #     print(indices)
-    #     neighbors = neighbors[:, indices]
-    #     wrappedDeltas = neighbors[:, indices]
-
     edgeIndex = torch.hstack((neighbors, neighbors.flip(0))).to(torch.int64)
     if cell is not None:
         deltas = positions[edgeIndex[0]] - positions[edgeIndex[1]]
@@ -118,12 +105,9 @@ def _getNeighborPairs(
         )
 
     if sort:
-        indices = torch.argsort(edgeIndex[0,:])
+        indices = torch.argsort(edgeIndex[0, :])
         edgeIndex = edgeIndex[:, indices]
-        shifts = shifts[ indices]
-        # shifts = -shifts
-
-
+        shifts = shifts[indices]
 
     return edgeIndex, shifts
 
@@ -192,6 +176,8 @@ class MACEPotentialImpl(MLPotentialImpl):
         returnEnergyType: str = "interaction_energy",
         decouple_indices: Optional[torch.Tensor] = None,
         optimized_model: bool = False,
+        interaction_lambda: Optional[torch.Tensor] = None,
+        model_idx: Optional[int] = None,
         **args,
     ) -> None:
         """
@@ -249,7 +235,19 @@ class MACEPotentialImpl(MLPotentialImpl):
             model = mace_off(model=size, device="cpu", return_raw_model=True)
         elif self.name == "mace":
             if self.modelPath is not None:
-                model = torch.load(self.modelPath, map_location="cpu")
+                if isinstance(self.modelPath, str):
+                    model = torch.load(self.modelPath, map_location="cpu")
+                elif isinstance(self.modelPath, list):
+                    assert (
+                        model_idx is not None
+                    ), "model_idx must be provided when modelPath is a list"
+                    print(
+                        "Loading model from",
+                        self.modelPath[model_idx],
+                        "for model_idx",
+                        model_idx,
+                    )
+                    model = torch.load(self.modelPath[model_idx], map_location="cpu")
             else:
                 raise ValueError("No modelPath provided for local MACE model.")
         else:
@@ -328,7 +326,9 @@ class MACEPotentialImpl(MLPotentialImpl):
                 dtype: torch.dtype,
                 returnEnergyType: str,
                 decouple_indices: Optional[torch.Tensor] = None,
-                optimized_model: bool = False
+                optimized_model: bool = False,
+                # if we are interpolating between mace Hamiltonians, fix the lambda at this value, then the global variable will control the interpolation between the potentials
+                interaction_lambda: Optional[torch.Tensor] = None,
             ) -> None:
                 """
                 Initialize the MACEForce.
@@ -357,6 +357,7 @@ class MACEPotentialImpl(MLPotentialImpl):
                 self.lengthScale = 10.0
                 self.returnEnergyType = returnEnergyType
                 self.decouple_indices = decouple_indices
+                self.interaction_lambda = interaction_lambda
 
                 if atoms is None:
                     self.indices = None
@@ -419,10 +420,12 @@ class MACEPotentialImpl(MLPotentialImpl):
                     positions = positions[self.indices]
 
                 # get lambda_interpolate from global parameters passed to from openmm-torch
-                if globalParameters is not None:
+                if self.interaction_lambda is not None:
+                    lambda_interpolate = self.interaction_lambda
+                elif globalParameters is not None:
                     lambda_interpolate = globalParameters
                 else:
-                    lambda_interpolate = torch.tensor(1.0)
+                    lambda_interpolate = torch.tensor(1.0, dtype=torch.float64)
 
                 positions = positions.to(self.dtype) * self.lengthScale
                 if boxvectors is not None:
@@ -446,6 +449,13 @@ class MACEPotentialImpl(MLPotentialImpl):
                     decouple_indices=self.decouple_indices,
                     lmbda=lambda_interpolate,
                 )[self.returnEnergyType]
+                # print(
+                #     "energy from model",
+                #     self.model,
+                #     "at lambda",
+                #     lambda_interpolate,
+                #     energy,
+                # )
 
                 assert (
                     energy is not None
@@ -465,7 +475,8 @@ class MACEPotentialImpl(MLPotentialImpl):
             dtype,
             returnEnergyType,
             decouple_indices,
-            optimized_model=optimized_model
+            optimized_model=optimized_model,
+            interaction_lambda=interaction_lambda,
         )
 
         # Convert it to TorchScript.
@@ -478,7 +489,7 @@ class MACEPotentialImpl(MLPotentialImpl):
         if decouple_indices is not None:
             force.addGlobalParameter("lambda_interpolate", 1.0)
             # enable calculation of dhdl
-            force.addEnergyParameterDerivative("lambda_interpolate")
+            # force.addEnergyParameterDerivative("lambda_interpolate")
         system.addForce(force)
 
 

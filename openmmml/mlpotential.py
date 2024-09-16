@@ -185,6 +185,99 @@ class MLPotential(object):
         self._impl.addForces(topology, system, None, 0, **args)
         return system
 
+    def createInterpolatedAlchemicalSystem(
+        self,
+        topology: openmm.app.Topology,
+        solute_atoms: Iterable[int],
+        interaction_lambda: float,
+        forceGroup: int = 0,
+        **args,
+    ):
+        """
+        Create a system entirely modelled by the interatomic potential, but the force is an interpolation between the softcore and regular MACE potentials
+         this will be evaluated in the end states where non-softcore mace is still valid.
+        """
+
+        solvent_atoms = [
+            atom.index for atom in topology.atoms() if atom.index not in solute_atoms
+        ]
+        all_atoms = [atom.index for atom in topology.atoms()]
+        system = openmm.System()
+        if topology.getPeriodicBoxVectors() is not None:
+            system.setDefaultPeriodicBoxVectors(*topology.getPeriodicBoxVectors())
+        for atom in topology.atoms():
+            if atom.element is None:
+                system.addParticle(0)
+            else:
+                system.addParticle(atom.element.mass)
+
+        logger.info(
+            f"Creating alchemical system with {len(solute_atoms)} solute atoms and {len(solvent_atoms)} solvent atoms"
+        )
+        print("Got precision to mlPotential", args["precision"])
+
+        # now we need to dd three forces and a lambda parameter to control how the various components are combined
+        # first the solute atoms only
+        cv = openmm.CustomCVForce("")
+        # we use lambda interpolate to retain compatability with the repex code in openmmtools
+        cv.addGlobalParameter("lambda_interpolate", 1)
+        tempSystem1 = openmm.System()
+
+        # pop optimized_model from the **args
+        _ = args.pop("optimized_model", None)
+
+        self._impl.addForces(
+            topology,
+            tempSystem1,
+            all_atoms,
+            forceGroup,
+            decouple_indices=torch.tensor(solute_atoms),
+            optimized_model=True,
+            interaction_lambda=torch.tensor(interaction_lambda),
+            model_idx=0,
+            **args,
+        )
+        potential_1_var_names = []
+        for idx, force in enumerate(tempSystem1.getForces()):
+            name = f"model1_force{idx+1}"
+            cv.addCollectiveVariable(name, deepcopy(force))
+            potential_1_var_names.append(name)
+
+        assert len(potential_1_var_names) > 0
+
+        potential_1_sum = "+".join(potential_1_var_names)
+
+        tempSystem2 = openmm.System()
+
+        self._impl.addForces(
+            topology,
+            tempSystem2,
+            all_atoms,
+            forceGroup,
+            decouple_indices=torch.tensor(solute_atoms),
+            interaction_lambda=interaction_lambda,
+            optimized_model=False,
+            # use the second model
+            model_idx=1,
+            **args,
+        )
+        potential_2_var_names = []
+        for idx, force in enumerate(tempSystem2.getForces()):
+            name = f"model2_force{idx+1}"
+            cv.addCollectiveVariable(name, deepcopy(force))
+            potential_2_var_names.append(name)
+
+        assert len(potential_2_var_names) > 0
+        potential_2_sum = "+".join(potential_2_var_names)
+        # now create the forces for the second mace potential
+
+        cv.setEnergyFunction(
+            f" lambda_interpolate * ({potential_1_sum}) + (1-lambda_interpolate) * ({potential_2_sum})"
+        )
+        system.addForce(cv)
+
+        return system
+
     def createAlchemicalSystem(
         self,
         topology: openmm.app.Topology,
@@ -221,28 +314,6 @@ class MLPotential(object):
         # cv.addEnergyParameterDerivative("lambda_interpolate")
         tempSystem = openmm.System()
 
-        # self._impl.addForces(
-        #     topology,
-        #     tempSystem,
-        #     solute_atoms,
-        #     forceGroup,
-        #     **args,
-        # )
-        # decoupledVarNames = []
-        # for idx, force in enumerate(tempSystem.getForces()):
-        #     name = f"soluteForce{idx+1}"
-        #     cv.addCollectiveVariable(name, deepcopy(force))
-        #     decoupledVarNames.append(name)
-        #
-        # tempSystem2 = openmm.System()
-        # self._impl.addForces(topology, tempSystem2, solvent_atoms, forceGroup, **args)
-        # for idx, force in enumerate(tempSystem2.getForces()):
-        #     name = f"solventForce{idx+1}"
-        #     cv.addCollectiveVariable(name, deepcopy(force))
-        #     decoupledVarNames.append(name)
-
-        # full system - contains interactions between solute and solvent.
-        # tempSystem3 = openmm.System()
         self._impl.addForces(
             topology,
             tempSystem,
@@ -257,13 +328,11 @@ class MLPotential(object):
             cv.addCollectiveVariable(name, deepcopy(force))
             interactingVarNames.append(name)
 
-        assert len(interactingVarNames) > 0 
+        assert len(interactingVarNames) > 0
 
         interactingSum = "+".join(interactingVarNames)
 
-        cv.setEnergyFunction(
-            f"({interactingSum})"
-        )
+        cv.setEnergyFunction(f"({interactingSum})")
         system.addForce(cv)
 
         return system
