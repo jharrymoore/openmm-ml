@@ -143,6 +143,7 @@ class MACEPotentialImpl(MLPotentialImpl):
 
                 self.model = torch.load(model_path, map_location=device)
                 self.model.to(self.default_dtype)
+                self.model.to(self.device)
                 self.model.eval()
 
                 # print(self.model)
@@ -153,6 +154,7 @@ class MACEPotentialImpl(MLPotentialImpl):
                 self.z_table = utils.AtomicNumberTable(
                     [int(z) for z in self.model.atomic_numbers]
                 )
+                self.model.atomic_numbers = torch.tensor(self.model.atomic_numbers.clone(), device=self.device)
 
                 self.model = jit.compile(self.model)
 
@@ -179,7 +181,7 @@ class MACEPotentialImpl(MLPotentialImpl):
                 if indices is None:
                     self.indices = None
                 else:
-                    self.indices = torch.tensor(indices, dtype=torch.int64)
+                    self.indices = torch.tensor(indices, dtype=torch.int64, device=self.device)
 
             def forward(self, positions, boxvectors: Optional[torch.Tensor] = None):
                 # setup positions
