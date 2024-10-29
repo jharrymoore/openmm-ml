@@ -427,7 +427,7 @@ class MACEPotentialImpl(MLPotentialImpl):
                     lambda_interpolate = torch.tensor(1.0)
 
                 positions = positions.to(self.dtype) * self.lengthScale
-                if boxvectors is not None:
+                if boxvectors is not None and boxvectors.dim() > 0:
                     cell = boxvectors.to(self.dtype) * self.lengthScale
                 else:
                     cell = None
